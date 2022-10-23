@@ -1,10 +1,10 @@
 <?php
 
-use App\Http\Controllers\ListingController;
-use App\Http\Controllers\UserController;
+use App\Models\Listing;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\Route;
-use App\Models\Listing;
+use App\Http\Controllers\UserController;
+use App\Http\Controllers\ListingController;
 
 /*
 |--------------------------------------------------------------------------
@@ -24,7 +24,7 @@ use App\Models\Listing;
 // store - Store new listing
 // edit - Show form to edit listing
 // update - Update listing
-// destroy - Delete listing  
+// destroy - Delete listing
 
 // All Listings
 Route::get('/', [ListingController::class, 'index']);
