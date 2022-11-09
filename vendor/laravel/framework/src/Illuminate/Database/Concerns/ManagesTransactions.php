@@ -3,6 +3,7 @@
 namespace Illuminate\Database\Concerns;
 
 use Closure;
+use Illuminate\Database\DeadlockException;
 use RuntimeException;
 use Throwable;
 
@@ -42,6 +43,7 @@ trait ManagesTransactions
 
             try {
                 if ($this->transactions == 1) {
+                    $this->fireConnectionEvent('committing');
                     $this->getPdo()->commit();
                 }
 
@@ -87,7 +89,7 @@ trait ManagesTransactions
                 $this->getName(), $this->transactions
             );
 
-            throw $e;
+            throw new DeadlockException($e->getMessage(), is_int($e->getCode()) ? $e->getCode() : 0, $e);
         }
 
         // If there was an exception we will rollback this transaction and then we
@@ -187,7 +189,8 @@ trait ManagesTransactions
      */
     public function commit()
     {
-        if ($this->transactions == 1) {
+        if ($this->transactionLevel() == 1) {
+            $this->fireConnectionEvent('committing');
             $this->getPdo()->commit();
         }
 
@@ -226,8 +229,7 @@ trait ManagesTransactions
     {
         $this->transactions = max(0, $this->transactions - 1);
 
-        if ($this->causedByConcurrencyError($e) &&
-            $currentAttempt < $maxAttempts) {
+        if ($this->causedByConcurrencyError($e) && $currentAttempt < $maxAttempts) {
             return;
         }
 

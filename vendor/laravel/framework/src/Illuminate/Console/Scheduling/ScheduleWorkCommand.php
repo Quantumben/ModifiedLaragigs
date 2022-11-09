@@ -42,7 +42,7 @@ class ScheduleWorkCommand extends Command
      */
     public function handle()
     {
-        $this->info('Schedule worker started successfully.');
+        $this->components->info('Running schedule tasks every minute.');
 
         [$lastExecutionStartedAt, $keyOfLastExecutionWithOutput, $executions] = [null, null, []];
 
@@ -51,7 +51,11 @@ class ScheduleWorkCommand extends Command
 
             if (Carbon::now()->second === 0 &&
                 ! Carbon::now()->startOfMinute()->equalTo($lastExecutionStartedAt)) {
-                $executions[] = $execution = new Process([PHP_BINARY, 'artisan', 'schedule:run']);
+                $executions[] = $execution = new Process([
+                    PHP_BINARY,
+                    defined('ARTISAN_BINARY') ? ARTISAN_BINARY : 'artisan',
+                    'schedule:run',
+                ]);
 
                 $execution->start();
 
@@ -59,18 +63,10 @@ class ScheduleWorkCommand extends Command
             }
 
             foreach ($executions as $key => $execution) {
-                $output = trim($execution->getIncrementalOutput()).
-                          trim($execution->getIncrementalErrorOutput());
+                $output = $execution->getIncrementalOutput().
+                          $execution->getIncrementalErrorOutput();
 
-                if (! empty($output)) {
-                    if ($key !== $keyOfLastExecutionWithOutput) {
-                        $this->info(PHP_EOL.'['.date('c').'] Execution #'.($key + 1).' output:');
-
-                        $keyOfLastExecutionWithOutput = $key;
-                    }
-
-                    $this->output->writeln($output);
-                }
+                $this->output->write(ltrim($output, "\n"));
 
                 if (! $execution->isRunning()) {
                     unset($executions[$key]);

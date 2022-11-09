@@ -706,7 +706,7 @@ class Container implements ArrayAccess, ContainerContract
                 throw $e;
             }
 
-            throw new EntryNotFoundException($id, $e->getCode(), $e);
+            throw new EntryNotFoundException($id, is_int($e->getCode()) ? $e->getCode() : 0, $e);
         }
     }
 
@@ -1004,6 +1004,10 @@ class Container implements ArrayAccess, ContainerContract
 
         if ($parameter->isDefaultValueAvailable()) {
             return $parameter->getDefaultValue();
+        }
+
+        if ($parameter->isVariadic()) {
+            return [];
         }
 
         $this->unresolvablePrimitive($parameter);

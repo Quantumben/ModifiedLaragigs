@@ -2,6 +2,7 @@
 
 namespace Illuminate\Database;
 
+use Carbon\CarbonInterval;
 use Closure;
 use DateTimeInterface;
 use Doctrine\DBAL\Connection as DoctrineConnection;
@@ -12,6 +13,7 @@ use Illuminate\Database\Events\QueryExecuted;
 use Illuminate\Database\Events\StatementPrepared;
 use Illuminate\Database\Events\TransactionBeginning;
 use Illuminate\Database\Events\TransactionCommitted;
+use Illuminate\Database\Events\TransactionCommitting;
 use Illuminate\Database\Events\TransactionRolledBack;
 use Illuminate\Database\Query\Builder as QueryBuilder;
 use Illuminate\Database\Query\Expression;
@@ -19,8 +21,8 @@ use Illuminate\Database\Query\Grammars\Grammar as QueryGrammar;
 use Illuminate\Database\Query\Processors\Processor;
 use Illuminate\Database\Schema\Builder as SchemaBuilder;
 use Illuminate\Support\Arr;
+use Illuminate\Support\InteractsWithTime;
 use Illuminate\Support\Traits\Macroable;
-use LogicException;
 use PDO;
 use PDOStatement;
 use RuntimeException;
@@ -30,6 +32,7 @@ class Connection implements ConnectionInterface
     use DetectsConcurrencyErrors,
         DetectsLostConnections,
         Concerns\ManagesTransactions,
+        InteractsWithTime,
         Macroable;
 
     /**
@@ -159,6 +162,20 @@ class Connection implements ConnectionInterface
     protected $loggingQueries = false;
 
     /**
+     * The duration of all executed queries in milliseconds.
+     *
+     * @var float
+     */
+    protected $totalQueryDuration = 0.0;
+
+    /**
+     * All of the registered query duration handlers.
+     *
+     * @var array
+     */
+    protected $queryDurationHandlers = [];
+
+    /**
      * Indicates if the connection is in a "dry run".
      *
      * @var bool
@@ -168,7 +185,7 @@ class Connection implements ConnectionInterface
     /**
      * All of the callbacks that should be invoked before a query is executed.
      *
-     * @var array
+     * @var \Closure[]
      */
     protected $beforeExecutingCallbacks = [];
 
@@ -182,14 +199,14 @@ class Connection implements ConnectionInterface
     /**
      * Type mappings that should be registered with new Doctrine connections.
      *
-     * @var array
+     * @var array<string, string>
      */
     protected $doctrineTypeMappings = [];
 
     /**
      * The connection resolvers.
      *
-     * @var array
+     * @var \Closure[]
      */
     protected static $resolvers = [];
 
@@ -453,9 +470,7 @@ class Connection implements ConnectionInterface
     {
         $statement->setFetchMode($this->fetchMode);
 
-        $this->event(new StatementPrepared(
-            $this, $statement
-        ));
+        $this->event(new StatementPrepared($this, $statement));
 
         return $statement;
     }
@@ -758,6 +773,8 @@ class Connection implements ConnectionInterface
      */
     public function logQuery($query, $bindings, $time = null)
     {
+        $this->totalQueryDuration += $time ?? 0.0;
+
         $this->event(new QueryExecuted($query, $bindings, $time, $this));
 
         if ($this->loggingQueries) {
@@ -774,6 +791,71 @@ class Connection implements ConnectionInterface
     protected function getElapsedTime($start)
     {
         return round((microtime(true) - $start) * 1000, 2);
+    }
+
+    /**
+     * Register a callback to be invoked when the connection queries for longer than a given amount of time.
+     *
+     * @param  \DateTimeInterface|\Carbon\CarbonInterval|float|int  $threshold
+     * @param  callable  $handler
+     * @return void
+     */
+    public function whenQueryingForLongerThan($threshold, $handler)
+    {
+        $threshold = $threshold instanceof DateTimeInterface
+            ? $this->secondsUntil($threshold) * 1000
+            : $threshold;
+
+        $threshold = $threshold instanceof CarbonInterval
+            ? $threshold->totalMilliseconds
+            : $threshold;
+
+        $this->queryDurationHandlers[] = [
+            'has_run' => false,
+            'handler' => $handler,
+        ];
+
+        $key = count($this->queryDurationHandlers) - 1;
+
+        $this->listen(function ($event) use ($threshold, $handler, $key) {
+            if (! $this->queryDurationHandlers[$key]['has_run'] && $this->totalQueryDuration() > $threshold) {
+                $handler($this, $event);
+
+                $this->queryDurationHandlers[$key]['has_run'] = true;
+            }
+        });
+    }
+
+    /**
+     * Allow all the query duration handlers to run again, even if they have already run.
+     *
+     * @return void
+     */
+    public function allowQueryDurationHandlersToRunAgain()
+    {
+        foreach ($this->queryDurationHandlers as $key => $queryDurationHandler) {
+            $this->queryDurationHandlers[$key]['has_run'] = false;
+        }
+    }
+
+    /**
+     * Get the duration of all run queries in milliseconds.
+     *
+     * @return float
+     */
+    public function totalQueryDuration()
+    {
+        return $this->totalQueryDuration;
+    }
+
+    /**
+     * Reset the duration of all run queries.
+     *
+     * @return void
+     */
+    public function resetTotalQueryDuration()
+    {
+        $this->totalQueryDuration = 0.0;
     }
 
     /**
@@ -823,9 +905,9 @@ class Connection implements ConnectionInterface
     /**
      * Reconnect to the database.
      *
-     * @return void
+     * @return mixed|false
      *
-     * @throws \LogicException
+     * @throws \Illuminate\Database\LostConnectionException
      */
     public function reconnect()
     {
@@ -835,7 +917,7 @@ class Connection implements ConnectionInterface
             return call_user_func($this->reconnector, $this);
         }
 
-        throw new LogicException('Lost connection and no reconnector available.');
+        throw new LostConnectionException('Lost connection and no reconnector available.');
     }
 
     /**
@@ -897,6 +979,7 @@ class Connection implements ConnectionInterface
         return $this->events?->dispatch(match ($event) {
             'beganTransaction' => new TransactionBeginning($this),
             'committed' => new TransactionCommitted($this),
+            'committing' => new TransactionCommitting($this),
             'rollingBack' => new TransactionRolledBack($this),
             default => null,
         });
@@ -1053,7 +1136,7 @@ class Connection implements ConnectionInterface
     /**
      * Register a custom Doctrine mapping type.
      *
-     * @param  string  $class
+     * @param  Type|class-string<Type>  $class
      * @param  string  $name
      * @param  string  $type
      * @return void
@@ -1061,7 +1144,7 @@ class Connection implements ConnectionInterface
      * @throws \Doctrine\DBAL\DBALException
      * @throws \RuntimeException
      */
-    public function registerDoctrineType(string $class, string $name, string $type): void
+    public function registerDoctrineType(Type|string $class, string $name, string $type): void
     {
         if (! $this->isDoctrineAvailable()) {
             throw new RuntimeException(
@@ -1070,7 +1153,8 @@ class Connection implements ConnectionInterface
         }
 
         if (! Type::hasType($name)) {
-            Type::addType($name, $class);
+            Type::getTypeRegistry()
+                ->register($name, is_string($class) ? new $class() : $class);
         }
 
         $this->doctrineTypeMappings[$name] = $type;
